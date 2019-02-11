@@ -11869,6 +11869,11 @@ static void nohz_balancer_kick(struct rq *rq)
 
 	sd = rcu_dereference(per_cpu(sd_asym_packing, cpu));
 	if (sd) {
+		/*
+		 * When ASYM_PACKING; see if there's a more preferred CPU
+		 * currently idle; in which case, kick the ILB to move tasks
+		 * around.
+		 */
 		for_each_cpu(i, sched_domain_span(sd)) {
 			if (i == cpu ||
 			    !cpumask_test_cpu(i, &cpumask))
