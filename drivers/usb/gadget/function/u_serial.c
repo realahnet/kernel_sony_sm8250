@@ -436,6 +436,7 @@ static void gs_rx_push(unsigned long _port)
 	 * REVISIT we should probably add a timer to keep the tasklet
 	 * from starving ... but it's not clear that case ever happens.
 	 */
+<<<<<<< HEAD
 	if (!list_empty(queue) && tty) {
 		if (!tty_throttled(tty)) {
 			if (do_push)
@@ -445,6 +446,10 @@ static void gs_rx_push(unsigned long _port)
 					port->port_num);
 		}
 	}
+=======
+	if (!list_empty(queue) && !tty_throttled(tty))
+		queue_delayed_work(system_power_efficient_wq, &port->push, 1);
+>>>>>>> 2405fee1c3cf1 (treewide: use more power efficient workingqueues)
 
 	/* If we're still connected, refill the USB RX queue. */
 	if (!disconnect && port->port_usb)
@@ -460,7 +465,11 @@ static void gs_read_complete(struct usb_ep *ep, struct usb_request *req)
 	/* Queue all received data until the tty layer is ready for it. */
 	spin_lock(&port->port_lock);
 	list_add_tail(&req->list, &port->read_queue);
+<<<<<<< HEAD
 	tasklet_schedule(&port->push);
+=======
+	queue_delayed_work(system_power_efficient_wq, &port->push, 0);
+>>>>>>> 2405fee1c3cf1 (treewide: use more power efficient workingqueues)
 	spin_unlock(&port->port_lock);
 }
 
