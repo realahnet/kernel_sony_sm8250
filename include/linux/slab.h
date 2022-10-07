@@ -314,6 +314,8 @@ enum kmalloc_cache_type {
 extern struct kmem_cache *
 kmalloc_caches[NR_KMALLOC_TYPES][KMALLOC_SHIFT_HIGH + 1];
 
+extern bool android_kmalloc_64_create;
+
 static __always_inline enum kmalloc_cache_type kmalloc_type(gfp_t flags)
 {
 #ifdef CONFIG_ZONE_DMA
@@ -346,6 +348,9 @@ static __always_inline unsigned int kmalloc_index(size_t size)
 {
 	if (!size)
 		return 0;
+
+	if (android_kmalloc_64_create && size <= 64)
+		return 6;
 
 	if (size <= KMALLOC_MIN_SIZE)
 		return KMALLOC_SHIFT_LOW;
