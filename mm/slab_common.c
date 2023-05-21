@@ -981,6 +981,7 @@ void __init create_boot_cache(struct kmem_cache *s, const char *name,
 		unsigned int useroffset, unsigned int usersize)
 {
 	int err;
+	unsigned int align = ARCH_KMALLOC_MINALIGN;
 
 	/*
 	 * Ensure object alignment is 64. Otherwise, it can be larger
