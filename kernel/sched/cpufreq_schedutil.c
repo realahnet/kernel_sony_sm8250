@@ -66,7 +66,6 @@ struct sugov_cpu {
 
 	unsigned long		util;
 	unsigned long		bw_min;
-
 };
 
 static DEFINE_PER_CPU(struct sugov_cpu, sugov_cpu);
