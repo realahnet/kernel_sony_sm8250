@@ -577,8 +577,6 @@ static u64 update_triggers(struct psi_group *group, u64 now)
 		if (now < t->last_event_time + t->win.size)
 			continue;
 
-		trace_psi_event(t->state, t->threshold);
-
 		/* Generate an event */
 		if (cmpxchg(&t->event, 0, 1) == 0) {
 			if (!strcmp(t->comm, ULMK_MAGIC))
@@ -620,7 +618,6 @@ void psi_emergency_trigger(void)
 	list_for_each_entry(t, &group->triggers, node) {
 		if (strcmp(t->comm, ULMK_MAGIC))
 			continue;
-		trace_psi_event(t->state, t->threshold);
 
 		/* Generate an event */
 		if (cmpxchg(&t->event, 0, 1) == 0) {
