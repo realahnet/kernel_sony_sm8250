@@ -240,8 +240,6 @@
 	et6xx: et6xx {
 		compatible = "egistec,et580";
 
-		egistec,gpio_irq = <&tlmm 23 0x0>;
-
 		et51x,gpio_irq = <&tlmm 23 0x0>;
 		et51x,no-low-voltage-probe;
 		et51x,vana-voltage = <3350000>;
@@ -250,7 +248,6 @@
 		pinctrl-names = "et51x_reset_reset",
 				"et51x_reset_active",
 				"et51x_irq_active";
-
 		pinctrl-0 = <&sm_gpio_74>;
 		pinctrl-1 = <&sm_gpio_74_output_high>;
 		pinctrl-2 = <&sm_gpio_23>;
@@ -2088,7 +2085,7 @@
 		config {
 			pins = "gpio23";
 			drive-strength = <2>;
-			bias-disable;
+			bias-pull-up;
 		        input-enable;
 		};
 	};
