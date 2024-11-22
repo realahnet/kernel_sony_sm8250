@@ -1,3 +1,4 @@
+obj-y				+= et6xx/
 obj-y				+= sec_ts/
 obj-y				+= tcs3490/
 obj-y				+= flash_led/
