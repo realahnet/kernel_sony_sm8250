@@ -6188,7 +6188,7 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 struct reciprocal_value schedtune_spc_rdiv;
 
 static long
-schedtune_margin(unsigned long signal, long boost, long capacity)
+schedtune_margin(unsigned long signal, long boost)
 {
 	long long margin = 0;
 
@@ -6197,14 +6197,12 @@ schedtune_margin(unsigned long signal, long boost, long capacity)
 	 *
 	 * The Boost (B) value is used to compute a Margin (M) which is
 	 * proportional to the complement of the original Signal (S):
-	 *   M = B * (capacity - S)
+	 *   M = B * (SCHED_CAPACITY_SCALE - S)
 	 * The obtained M could be used by the caller to "boost" S.
 	 */
 	if (boost >= 0) {
-		if (capacity > signal) {
-			margin  = capacity - signal;
-			margin *= boost;
-		}
+		margin  = SCHED_CAPACITY_SCALE - signal;
+		margin *= boost;
 	} else
 		margin = -signal * boost;
 
@@ -6224,7 +6222,7 @@ schedtune_cpu_margin_with(unsigned long util, int cpu, struct task_struct *p)
 	if (boost == 0)
 		margin = 0;
 	else
-		margin = schedtune_margin(util, boost, capacity_orig_of(cpu));
+		margin = schedtune_margin(util, boost);
 
 	trace_sched_boost_cpu(cpu, util, margin);
 
@@ -6241,7 +6239,7 @@ long schedtune_task_margin(struct task_struct *task)
 		return 0;
 
 	util = task_util_est(task);
-	margin = schedtune_margin(util, boost, SCHED_CAPACITY_SCALE);
+	margin = schedtune_margin(util, boost);
 
 	return margin;
 }
@@ -9862,6 +9860,16 @@ static bool update_sd_pick_busiest(struct lb_env *env,
 		goto asym_packing;
 
 	/*
+	 * Candidate sg has no more than one task per CPU and
+	 * has higher per-CPU capacity. Migrating tasks to less
+	 * capable CPUs may harm throughput. Maximize throughput,
+	 * power/energy consequences are not considered.
+	 */
+	if (sgs->sum_nr_running <= sgs->group_weight &&
+	    group_smaller_min_cpu_capacity(sds->local, sg))
+		return false;
+
+	/*
 	 * Candidate sg doesn't face any severe imbalance issues so
 	 * don't disturb unless the groups are of similar capacity
 	 * where balancing is more harmless.
@@ -10621,7 +10629,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 
 static int need_active_balance(struct lb_env *env)
 {
-        struct sched_domain *sd = env->sd;
+	struct sched_domain *sd = env->sd;
 
 	if (env->idle == CPU_NEWLY_IDLE) {
 
@@ -10632,6 +10640,19 @@ static int need_active_balance(struct lb_env *env)
 		 */
 		if ((sd->flags & SD_ASYM_PACKING) &&
 		    sched_asym_prefer(env->dst_cpu, env->src_cpu))
+			return 1;
+	}
+
+	/*
+	 * The dst_cpu is idle and the src_cpu CPU has only 1 CFS task.
+	 * It's worth migrating the task if the src_cpu's capacity is reduced
+	 * because of other sched_class or IRQs if more capacity stays
+	 * available on dst_cpu.
+	 */
+	if ((env->idle != CPU_NOT_IDLE) &&
+	    (env->src_rq->cfs.h_nr_running == 1)) {
+		if ((check_cpu_capacity(env->src_rq, sd)) &&
+		    (capacity_of(env->src_cpu)*sd->imbalance_pct < capacity_of(env->dst_cpu)*100))
 			return 1;
 	}
 
@@ -11596,6 +11617,15 @@ static void nohz_balancer_kick(struct rq *rq)
 			goto unlock;
 		}
 
+	}
+
+	sd = rcu_dereference(rq->sd);
+	if (sd) {
+		if ((rq->cfs.h_nr_running >= 1) &&
+				check_cpu_capacity(rq, sd)) {
+			flags = NOHZ_KICK_MASK;
+			goto unlock;
+		}
 	}
 
 	sd = rcu_dereference(per_cpu(sd_asym_packing, cpu));
