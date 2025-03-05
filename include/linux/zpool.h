@@ -63,6 +63,15 @@ unsigned long zpool_compact(struct zpool *pool);
 
 unsigned long zpool_get_num_compacted(struct zpool *pool);
 
+void *zpool_obj_read_begin(struct zpool *zpool, unsigned long handle,
+			   void *local_copy);
+
+void zpool_obj_read_end(struct zpool *zpool, unsigned long handle,
+			void *handle_mem);
+
+void zpool_obj_write(struct zpool *zpool, unsigned long handle,
+		     void *handle_mem, size_t mem_len);
+
 u64 zpool_get_total_size(struct zpool *pool);
 
 size_t zpool_huge_class_size(struct zpool *zpool);
@@ -110,6 +119,13 @@ struct zpool_driver {
 
 	unsigned long (*compact)(void *pool);
 	unsigned long (*get_num_compacted)(void *pool);
+
+	void *(*obj_read_begin)(void *pool, unsigned long handle,
+				void *local_copy);
+	void (*obj_read_end)(void *pool, unsigned long handle,
+			     void *handle_mem);
+	void (*obj_write)(void *pool, unsigned long handle,
+			  void *handle_mem, size_t mem_len);
 
 	u64 (*total_size)(void *pool);
 	size_t (*huge_class_size)(void *pool);
