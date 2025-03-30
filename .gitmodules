@@ -1,3 +1,6 @@
 [submodule "drivers/misc/kprofiles"]
 	path = drivers/misc/kprofiles
 	url = https://github.com/beakthoven/Kprofiles.git
+[submodule "KernelSU-Next"]
+	path = KernelSU-Next
+	url = https://github.com/KernelSU-Next/KernelSU-Next
