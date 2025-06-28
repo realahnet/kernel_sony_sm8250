@@ -21,9 +21,6 @@
 #include "pnode.h"
 #include "internal.h"
 
-/* This is very good example if you still don't get it.*/
-/* More info: https://github.com/KernelSU-Next/KernelSU-Next/commit/8df2cbcade8a46eef98fb2ed0deb68ad51155232#commitcomment-156399657 */
-
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern bool susfs_is_current_ksu_domain(void);
 bool susfs_hide_sus_mnts_for_all_procs = true; // hide sus mounts for all processes by default
@@ -114,7 +111,8 @@ static int show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) && (susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) &&
+		(susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
 		return 0;
 #endif
 
@@ -155,7 +153,8 @@ static int show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) && (susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) &&
+		(susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
 		return 0;
 #endif
 
@@ -224,7 +223,8 @@ static int show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
 	int err;
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) && (susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
+	if (unlikely(r->mnt_id >= DEFAULT_SUS_MNT_ID) &&
+		(susfs_hide_sus_mnts_for_all_procs || !susfs_is_current_ksu_domain()))
 		return 0;
 #endif
 
