@@ -379,7 +379,6 @@ CONFIG_PCI_MSM_MSI=y
 #
 CONFIG_KSU=y
 CONFIG_KSU_SUSFS=y
-CONFIG_KSU_WITH_KPROBES=n
 
 #
 # ARM errata workarounds via the alternatives framework
