@@ -4472,7 +4472,8 @@ should_reclaim_retry(gfp_t gfp_mask, unsigned order,
 	 * their order will become available due to high fragmentation so
 	 * always increment the no progress counter for them
 	 */
-	if (did_some_progress && order <= PAGE_ALLOC_COSTLY_ORDER)
+	if ((did_some_progress && order <= PAGE_ALLOC_COSTLY_ORDER) ||
+			IS_ENABLED(CONFIG_HAVE_LOW_MEMORY_KILLER))
 		*no_progress_loops = 0;
 	else
 		(*no_progress_loops)++;
@@ -4854,8 +4855,6 @@ nopage:
 		goto retry;
 	}
 fail:
-	trace_mm_page_alloc_fail(order, gfp_mask);
-
 got_pg:
 	if (woke_kswapd)
 		atomic_long_dec(&kswapd_waiters);
@@ -4979,9 +4978,6 @@ out:
 	}
 
 	trace_mm_page_alloc(page, order, alloc_mask, ac.migratetype);
-	if (order > 1)
-		trace_mm_page_alloc_highorder(page, order,
-					      alloc_mask, ac.migratetype);
 
 	return page;
 }
