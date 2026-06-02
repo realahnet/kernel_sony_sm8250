@@ -1,25 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * KFENCE guarded object allocator and fault handling.
- *
- * Copyright (C) 2020, Google LLC.
- */
 
 #define pr_fmt(fmt) "kfence: " fmt
 
 #include <linux/atomic.h>
 #include <linux/bug.h>
 #include <linux/debugfs.h>
-#include <linux/irq_work.h>
 #include <linux/kfence.h>
-#include <linux/kmemleak.h>
 #include <linux/list.h>
 #include <linux/lockdep.h>
 #include <linux/bootmem.h>
 #include <linux/moduleparam.h>
 #include <linux/random.h>
 #include <linux/rcupdate.h>
-#include <linux/sched/sysctl.h>
 #include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -103,13 +95,14 @@ struct kfence_metadata kfence_metadata[CONFIG_KFENCE_NUM_OBJECTS];
 static struct list_head kfence_freelist = LIST_HEAD_INIT(kfence_freelist);
 static DEFINE_RAW_SPINLOCK(kfence_freelist_lock); /* Lock protecting freelist. */
 
-#ifdef CONFIG_KFENCE_STATIC_KEYS
 /* The static key to set up a KFENCE allocation. */
 DEFINE_STATIC_KEY_FALSE(kfence_allocation_key);
-#endif
 
 /* Gates the allocation, ensuring only one succeeds in a given period. */
-atomic_t kfence_allocation_gate = ATOMIC_INIT(1);
+static atomic_t allocation_gate = ATOMIC_INIT(1);
+
+/* Wait queue to wake up allocation-gate timer task. */
+static DECLARE_WAIT_QUEUE_HEAD(allocation_wait);
 
 /* Statistics counters for debugfs. */
 enum kfence_counter_id {
@@ -226,7 +219,7 @@ static inline bool check_canary_byte(u8 *addr)
 		return true;
 
 	atomic_long_inc(&counters[KFENCE_COUNTER_BUGS]);
-	kfence_report_error((unsigned long)addr, false, NULL, addr_to_metadata((unsigned long)addr),
+	kfence_report_error((unsigned long)addr, addr_to_metadata((unsigned long)addr),
 			    KFENCE_ERROR_CORRUPTION);
 	return false;
 }
@@ -327,10 +320,6 @@ static void *kfence_guarded_alloc(struct kmem_cache *cache, size_t size, gfp_t g
 	/* Set required struct page fields. */
 	page = virt_to_page(meta->addr);
 	page->slab_cache = cache;
-	if (IS_ENABLED(CONFIG_SLUB))
-		page->objects = 1;
-	if (IS_ENABLED(CONFIG_SLAB))
-		page->s_mem = addr;
 
 	raw_spin_unlock_irqrestore(&meta->lock, flags);
 
@@ -364,8 +353,7 @@ static void kfence_guarded_free(void *addr, struct kfence_metadata *meta, bool z
 	if (meta->state != KFENCE_OBJECT_ALLOCATED || meta->addr != (unsigned long)addr) {
 		/* Invalid or double-free, bail out. */
 		atomic_long_inc(&counters[KFENCE_COUNTER_BUGS]);
-		kfence_report_error((unsigned long)addr, false, NULL, meta,
-				    KFENCE_ERROR_INVALID_FREE);
+		kfence_report_error((unsigned long)addr, meta, KFENCE_ERROR_INVALID_FREE);
 		raw_spin_unlock_irqrestore(&meta->lock, flags);
 		return;
 	}
@@ -375,7 +363,6 @@ static void kfence_guarded_free(void *addr, struct kfence_metadata *meta, bool z
 
 	/* Restore page protection if there was an OOB access. */
 	if (meta->unprotected_page) {
-		memzero_explicit((void *)ALIGN_DOWN(meta->unprotected_page, PAGE_SIZE), PAGE_SIZE);
 		kfence_protect(meta->unprotected_page);
 		meta->unprotected_page = 0;
 	}
@@ -484,14 +471,6 @@ static bool __init kfence_init_pool(void)
 		addr += 2 * PAGE_SIZE;
 	}
 
-	/*
-	 * The pool is live and will never be deallocated from this point on.
-	 * Remove the pool object from the kmemleak object tree, as it would
-	 * otherwise overlap with allocations returned by kfence_alloc(), which
-	 * are registered with kmemleak through the slab post-alloc hook.
-	 */
-	kmemleak_free(__kfence_pool);
-
 	return true;
 
 err:
@@ -574,7 +553,6 @@ static const struct file_operations objects_fops = {
 	.open = open_objects,
 	.read = seq_read,
 	.llseek = seq_lseek,
-	.release = seq_release,
 };
 
 static int __init kfence_debugfs_init(void)
@@ -589,17 +567,6 @@ static int __init kfence_debugfs_init(void)
 late_initcall(kfence_debugfs_init);
 
 /* === Allocation Gate Timer ================================================ */
-
-#ifdef CONFIG_KFENCE_STATIC_KEYS
-/* Wait queue to wake up allocation-gate timer task. */
-static DECLARE_WAIT_QUEUE_HEAD(allocation_wait);
-
-static void wake_up_kfence_timer(struct irq_work *work)
-{
-	wake_up(&allocation_wait);
-}
-static DEFINE_IRQ_WORK(wake_up_kfence_timer_work, wake_up_kfence_timer);
-#endif
 
 /*
  * Set up delayed work, which will enable and disable the static key. We need to
@@ -618,27 +585,14 @@ static void toggle_allocation_gate(struct work_struct *work)
 	if (!READ_ONCE(kfence_enabled))
 		return;
 
-	atomic_set(&kfence_allocation_gate, 0);
-#ifdef CONFIG_KFENCE_STATIC_KEYS
 	/* Enable static key, and await allocation to happen. */
+	atomic_set(&allocation_gate, 0);
 	static_branch_enable(&kfence_allocation_key);
-
-	if (sysctl_hung_task_timeout_secs) {
-		/*
-		 * During low activity with no allocations we might wait a
-		 * while; let's avoid the hung task warning.
-		 */
-		wait_event_idle_timeout(allocation_wait, atomic_read(&kfence_allocation_gate),
-					sysctl_hung_task_timeout_secs * HZ / 2);
-	} else {
-		wait_event_idle(allocation_wait, atomic_read(&kfence_allocation_gate));
-	}
+	wait_event(allocation_wait, atomic_read(&allocation_gate) != 0);
 
 	/* Disable static key and reset timer. */
 	static_branch_disable(&kfence_allocation_key);
-#endif
-	queue_delayed_work(system_unbound_wq, &kfence_timer,
-			   msecs_to_jiffies(kfence_sample_interval));
+	schedule_delayed_work(&kfence_timer, msecs_to_jiffies(kfence_sample_interval));
 }
 static DECLARE_DELAYED_WORK(kfence_timer, toggle_allocation_gate);
 
@@ -667,10 +621,14 @@ void __init kfence_init(void)
 	}
 
 	WRITE_ONCE(kfence_enabled, true);
-	queue_delayed_work(system_unbound_wq, &kfence_timer, 0);
-	pr_info("initialized - using %lu bytes for %d objects at 0x%p-0x%p\n", KFENCE_POOL_SIZE,
-		CONFIG_KFENCE_NUM_OBJECTS, (void *)__kfence_pool,
-		(void *)(__kfence_pool + KFENCE_POOL_SIZE));
+	schedule_delayed_work(&kfence_timer, 0);
+	pr_info("initialized - using %lu bytes for %d objects", KFENCE_POOL_SIZE,
+		CONFIG_KFENCE_NUM_OBJECTS);
+	if (IS_ENABLED(CONFIG_DEBUG_KERNEL))
+		pr_cont(" at 0x%px-0x%px\n", (void *)__kfence_pool,
+			(void *)(__kfence_pool + KFENCE_POOL_SIZE));
+	else
+		pr_cont("\n");
 }
 
 void kfence_shutdown_cache(struct kmem_cache *s)
@@ -735,43 +693,18 @@ void kfence_shutdown_cache(struct kmem_cache *s)
 void *__kfence_alloc(struct kmem_cache *s, size_t size, gfp_t flags)
 {
 	/*
-	 * Perform size check before switching kfence_allocation_gate, so that
-	 * we don't disable KFENCE without making an allocation.
-	 */
-	if (size > PAGE_SIZE)
-		return NULL;
-
-	/*
-	 * Skip allocations from non-default zones, including DMA. We cannot
-	 * guarantee that pages in the KFENCE pool will have the requested
-	 * properties (e.g. reside in DMAable memory).
-	 */
-	if ((flags & GFP_ZONEMASK) ||
-	    (s->flags & (SLAB_CACHE_DMA | SLAB_CACHE_DMA32)))
-		return NULL;
-
-	/*
 	 * allocation_gate only needs to become non-zero, so it doesn't make
 	 * sense to continue writing to it and pay the associated contention
 	 * cost, in case we have a large number of concurrent allocations.
 	 */
-	if (atomic_read(&kfence_allocation_gate) || atomic_inc_return(&kfence_allocation_gate) > 1)
+	if (atomic_read(&allocation_gate) || atomic_inc_return(&allocation_gate) > 1)
 		return NULL;
-#ifdef CONFIG_KFENCE_STATIC_KEYS
-	/*
-	 * waitqueue_active() is fully ordered after the update of
-	 * kfence_allocation_gate per atomic_inc_return().
-	 */
-	if (waitqueue_active(&allocation_wait)) {
-		/*
-		 * Calling wake_up() here may deadlock when allocations happen
-		 * from within timer code. Use an irq_work to defer it.
-		 */
-		irq_work_queue(&wake_up_kfence_timer_work);
-	}
-#endif
+	wake_up(&allocation_wait);
 
 	if (!READ_ONCE(kfence_enabled))
+		return NULL;
+
+	if (size > PAGE_SIZE)
 		return NULL;
 
 	return kfence_guarded_alloc(s, size, flags);
@@ -815,7 +748,7 @@ void __kfence_free(void *addr)
 		kfence_guarded_free(addr, meta, false);
 }
 
-bool kfence_handle_page_fault(unsigned long addr, bool is_write, struct pt_regs *regs)
+bool kfence_handle_page_fault(unsigned long addr)
 {
 	const int page_index = (addr - (unsigned long)__kfence_pool) / PAGE_SIZE;
 	struct kfence_metadata *to_report = NULL;
@@ -878,11 +811,11 @@ bool kfence_handle_page_fault(unsigned long addr, bool is_write, struct pt_regs 
 
 out:
 	if (to_report) {
-		kfence_report_error(addr, is_write, regs, to_report, error_type);
+		kfence_report_error(addr, to_report, error_type);
 		raw_spin_unlock_irqrestore(&to_report->lock, flags);
 	} else {
 		/* This may be a UAF or OOB access, but we can't be sure. */
-		kfence_report_error(addr, is_write, regs, NULL, KFENCE_ERROR_INVALID);
+		kfence_report_error(addr, NULL, KFENCE_ERROR_INVALID);
 	}
 
 	return kfence_unprotect(addr); /* Unprotect and let access proceed. */

@@ -1,15 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Kernel Electric-Fence (KFENCE). Public interface for allocator and fault
- * handler integration. For more info see Documentation/dev-tools/kfence.rst.
- *
- * Copyright (C) 2020, Google LLC.
- */
 
 #ifndef _LINUX_KFENCE_H
 #define _LINUX_KFENCE_H
 
 #include <linux/mm.h>
+#include <linux/static_key.h>
 #include <linux/types.h>
 
 #ifdef CONFIG_KFENCE
@@ -22,13 +17,7 @@
 #define KFENCE_POOL_SIZE ((CONFIG_KFENCE_NUM_OBJECTS + 1) * 2 * PAGE_SIZE)
 extern char *__kfence_pool;
 
-#ifdef CONFIG_KFENCE_STATIC_KEYS
-#include <linux/static_key.h>
 DECLARE_STATIC_KEY_FALSE(kfence_allocation_key);
-#else
-#include <linux/atomic.h>
-extern atomic_t kfence_allocation_gate;
-#endif
 
 /**
  * is_kfence_address() - check if an address belongs to KFENCE pool
@@ -51,11 +40,10 @@ extern atomic_t kfence_allocation_gate;
 static __always_inline bool is_kfence_address(const void *addr)
 {
 	/*
-	 * The __kfence_pool != NULL check is required to deal with the case
-	 * where __kfence_pool == NULL && addr < KFENCE_POOL_SIZE. Keep it in
-	 * the slow-path after the range-check!
+	 * The non-NULL check is required in case the __kfence_pool pointer was
+	 * never initialized; keep it in the slow-path after the range-check.
 	 */
-	return unlikely((unsigned long)((char *)addr - __kfence_pool) < KFENCE_POOL_SIZE && __kfence_pool);
+	return unlikely((unsigned long)((char *)addr - __kfence_pool) < KFENCE_POOL_SIZE && addr);
 }
 
 /**
@@ -116,11 +104,7 @@ void *__kfence_alloc(struct kmem_cache *s, size_t size, gfp_t flags);
  */
 static __always_inline void *kfence_alloc(struct kmem_cache *s, size_t size, gfp_t flags)
 {
-#ifdef CONFIG_KFENCE_STATIC_KEYS
 	if (static_branch_unlikely(&kfence_allocation_key))
-#else
-	if (unlikely(!atomic_read(&kfence_allocation_gate)))
-#endif
 		return __kfence_alloc(s, size, flags);
 	return NULL;
 }
@@ -141,7 +125,7 @@ size_t kfence_ksize(const void *addr);
 
 /**
  * kfence_object_start() - find the beginning of a KFENCE object
- * @addr: address within a KFENCE-allocated object
+ * @addr - address within a KFENCE-allocated object
  *
  * Return: address of the beginning of the object.
  *
@@ -187,8 +171,6 @@ static __always_inline __must_check bool kfence_free(void *addr)
 /**
  * kfence_handle_page_fault() - perform page fault handling for KFENCE pages
  * @addr: faulting address
- * @is_write: is access a write
- * @regs: current struct pt_regs (can be NULL, but shows full stack trace)
  *
  * Return:
  * * false - address outside KFENCE pool,
@@ -199,7 +181,7 @@ static __always_inline __must_check bool kfence_free(void *addr)
  * cases KFENCE prints an error message and marks the offending page as
  * present, so that the kernel can proceed.
  */
-bool __must_check kfence_handle_page_fault(unsigned long addr, bool is_write, struct pt_regs *regs);
+bool __must_check kfence_handle_page_fault(unsigned long addr);
 
 #else /* CONFIG_KFENCE */
 
@@ -212,11 +194,7 @@ static inline size_t kfence_ksize(const void *addr) { return 0; }
 static inline void *kfence_object_start(const void *addr) { return NULL; }
 static inline void __kfence_free(void *addr) { }
 static inline bool __must_check kfence_free(void *addr) { return false; }
-static inline bool __must_check kfence_handle_page_fault(unsigned long addr, bool is_write,
-							 struct pt_regs *regs)
-{
-	return false;
-}
+static inline bool __must_check kfence_handle_page_fault(unsigned long addr) { return false; }
 
 #endif
 

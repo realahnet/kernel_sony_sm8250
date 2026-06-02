@@ -1,31 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * KFENCE reporting.
- *
- * Copyright (C) 2020, Google LLC.
- */
 
 #include <stdarg.h>
 
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/printk.h>
-#include <linux/sched/debug.h>
 #include <linux/seq_file.h>
 #include <linux/stacktrace.h>
 #include <linux/string.h>
-#include <trace/events/error_report.h>
 
 #include <asm/kfence.h>
 
 #include "kfence.h"
-
-/* May be overridden by <asm/kfence.h>. */
-#ifndef ARCH_FUNC_PREFIX
-#define ARCH_FUNC_PREFIX ""
-#endif
-
-extern bool no_hash_pointers;
 
 /* Helper function to either print to a seq_file or to console. */
 __printf(2, 3)
@@ -50,6 +36,7 @@ static int get_stack_skipnr(const unsigned long stack_entries[], int num_entries
 {
 	char buf[64];
 	int skipnr, fallback = 0;
+	bool is_access_fault = false;
 
 	if (type) {
 		/* Depending on error type, find different stack entries. */
@@ -57,12 +44,8 @@ static int get_stack_skipnr(const unsigned long stack_entries[], int num_entries
 		case KFENCE_ERROR_UAF:
 		case KFENCE_ERROR_OOB:
 		case KFENCE_ERROR_INVALID:
-			/*
-			 * kfence_handle_page_fault() may be called with pt_regs
-			 * set to NULL; in that case we'll simply show the full
-			 * stack trace.
-			 */
-			return 0;
+			is_access_fault = true;
+			break;
 		case KFENCE_ERROR_CORRUPTION:
 		case KFENCE_ERROR_INVALID_FREE:
 			break;
@@ -72,22 +55,26 @@ static int get_stack_skipnr(const unsigned long stack_entries[], int num_entries
 	for (skipnr = 0; skipnr < num_entries; skipnr++) {
 		int len = scnprintf(buf, sizeof(buf), "%ps", (void *)stack_entries[skipnr]);
 
-		if (str_has_prefix(buf, ARCH_FUNC_PREFIX "kfence_") ||
-		    str_has_prefix(buf, ARCH_FUNC_PREFIX "__kfence_") ||
-		    !strncmp(buf, ARCH_FUNC_PREFIX "__slab_free", len)) {
-			/*
-			 * In case of tail calls from any of the below
-			 * to any of the above.
-			 */
-			fallback = skipnr + 1;
-		}
+		if (is_access_fault) {
+			if (!strncmp(buf, KFENCE_SKIP_ARCH_FAULT_HANDLER, len))
+				goto found;
+		} else {
+			if (str_has_prefix(buf, "kfence_") || str_has_prefix(buf, "__kfence_") ||
+			    !strncmp(buf, "__slab_free", len)) {
+				/*
+				 * In case of tail calls from any of the below
+				 * to any of the above.
+				 */
+				fallback = skipnr + 1;
+			}
 
-		/* Also the *_bulk() variants by only checking prefixes. */
-		if (str_has_prefix(buf, ARCH_FUNC_PREFIX "kfree") ||
-		    str_has_prefix(buf, ARCH_FUNC_PREFIX "kmem_cache_free") ||
-		    str_has_prefix(buf, ARCH_FUNC_PREFIX "__kmalloc") ||
-		    str_has_prefix(buf, ARCH_FUNC_PREFIX "kmem_cache_alloc"))
-			goto found;
+			/* Also the *_bulk() variants by only checking prefixes. */
+			if (str_has_prefix(buf, "kfree") ||
+			    str_has_prefix(buf, "kmem_cache_free") ||
+			    str_has_prefix(buf, "__kmalloc") ||
+			    str_has_prefix(buf, "kmem_cache_alloc"))
+				goto found;
+		}
 	}
 	if (fallback < num_entries)
 		return fallback;
@@ -122,12 +109,12 @@ void kfence_print_object(struct seq_file *seq, const struct kfence_metadata *met
 	lockdep_assert_held(&meta->lock);
 
 	if (meta->state == KFENCE_OBJECT_UNUSED) {
-		seq_con_printf(seq, "kfence-#%td unused\n", meta - kfence_metadata);
+		seq_con_printf(seq, "kfence-#%zd unused\n", meta - kfence_metadata);
 		return;
 	}
 
 	seq_con_printf(seq,
-		       "kfence-#%td [0x%p-0x%p"
+		       "kfence-#%zd [0x" PTR_FMT "-0x" PTR_FMT
 		       ", size=%d, cache=%s] allocated by task %d:\n",
 		       meta - kfence_metadata, (void *)start, (void *)(start + size - 1), size,
 		       (cache && cache->name) ? cache->name : "<destroyed>", meta->alloc_track.pid);
@@ -157,7 +144,7 @@ static void print_diff_canary(unsigned long address, size_t bytes_to_show,
 	for (cur = (const u8 *)address; cur < end; cur++) {
 		if (*cur == KFENCE_CANARY_PATTERN(cur))
 			pr_cont(" .");
-		else if (no_hash_pointers)
+		else if (IS_ENABLED(CONFIG_DEBUG_KERNEL))
 			pr_cont(" 0x%02x", *cur);
 		else /* Do not leak kernel memory in non-debug builds. */
 			pr_cont(" !");
@@ -165,25 +152,13 @@ static void print_diff_canary(unsigned long address, size_t bytes_to_show,
 	pr_cont(" ]");
 }
 
-static const char *get_access_type(bool is_write)
-{
-	return is_write ? "write" : "read";
-}
-
-void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *regs,
-			 const struct kfence_metadata *meta, enum kfence_error_type type)
+void kfence_report_error(unsigned long address, const struct kfence_metadata *meta,
+			 enum kfence_error_type type)
 {
 	unsigned long stack_entries[KFENCE_STACK_DEPTH] = { 0 };
+	int num_stack_entries = stack_trace_save(stack_entries, KFENCE_STACK_DEPTH, 1);
+	int skipnr = get_stack_skipnr(stack_entries, num_stack_entries, &type);
 	const ptrdiff_t object_index = meta ? meta - kfence_metadata : -1;
-	int num_stack_entries;
-	int skipnr = 0;
-
-	if (regs) {
-		num_stack_entries = stack_trace_save_regs(regs, stack_entries, KFENCE_STACK_DEPTH, 0);
-	} else {
-		num_stack_entries = stack_trace_save(stack_entries, KFENCE_STACK_DEPTH, 1);
-		skipnr = get_stack_skipnr(stack_entries, num_stack_entries, &type);
-	}
 
 	/* Require non-NULL meta, except if KFENCE_ERROR_INVALID. */
 	if (WARN_ON(type != KFENCE_ERROR_INVALID && !meta))
@@ -208,35 +183,31 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 	case KFENCE_ERROR_OOB: {
 		const bool left_of_object = address < meta->addr;
 
-		pr_err("BUG: KFENCE: out-of-bounds %s in %pS\n\n", get_access_type(is_write),
-		       (void *)stack_entries[skipnr]);
-		pr_err("Out-of-bounds %s at 0x%p (%luB %s of kfence-#%td):\n",
-		       get_access_type(is_write), (void *)address,
+		pr_err("BUG: KFENCE: out-of-bounds in %pS\n\n", (void *)stack_entries[skipnr]);
+		pr_err("Out-of-bounds access at 0x" PTR_FMT " (%luB %s of kfence-#%zd):\n",
+		       (void *)address,
 		       left_of_object ? meta->addr - address : address - meta->addr,
 		       left_of_object ? "left" : "right", object_index);
 		break;
 	}
 	case KFENCE_ERROR_UAF:
-		pr_err("BUG: KFENCE: use-after-free %s in %pS\n\n", get_access_type(is_write),
-		       (void *)stack_entries[skipnr]);
-		pr_err("Use-after-free %s at 0x%p (in kfence-#%td):\n",
-		       get_access_type(is_write), (void *)address, object_index);
+		pr_err("BUG: KFENCE: use-after-free in %pS\n\n", (void *)stack_entries[skipnr]);
+		pr_err("Use-after-free access at 0x" PTR_FMT " (in kfence-#%zd):\n",
+		       (void *)address, object_index);
 		break;
 	case KFENCE_ERROR_CORRUPTION:
 		pr_err("BUG: KFENCE: memory corruption in %pS\n\n", (void *)stack_entries[skipnr]);
-		pr_err("Corrupted memory at 0x%p ", (void *)address);
+		pr_err("Corrupted memory at 0x" PTR_FMT " ", (void *)address);
 		print_diff_canary(address, 16, meta);
-		pr_cont(" (in kfence-#%td):\n", object_index);
+		pr_cont(" (in kfence-#%zd):\n", object_index);
 		break;
 	case KFENCE_ERROR_INVALID:
-		pr_err("BUG: KFENCE: invalid %s in %pS\n\n", get_access_type(is_write),
-		       (void *)stack_entries[skipnr]);
-		pr_err("Invalid %s at 0x%p:\n", get_access_type(is_write),
-		       (void *)address);
+		pr_err("BUG: KFENCE: invalid access in %pS\n\n", (void *)stack_entries[skipnr]);
+		pr_err("Invalid access at 0x" PTR_FMT ":\n", (void *)address);
 		break;
 	case KFENCE_ERROR_INVALID_FREE:
 		pr_err("BUG: KFENCE: invalid free in %pS\n\n", (void *)stack_entries[skipnr]);
-		pr_err("Invalid free of 0x%p (in kfence-#%td):\n", (void *)address,
+		pr_err("Invalid free of 0x" PTR_FMT " (in kfence-#%zd):\n", (void *)address,
 		       object_index);
 		break;
 	}
@@ -251,11 +222,7 @@ void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *r
 
 	/* Print report footer. */
 	pr_err("\n");
-	if (no_hash_pointers && regs)
-		show_regs(regs);
-	else
-		dump_stack_print_info(KERN_ERR);
-	trace_error_report_end(ERROR_DETECTOR_KFENCE, address);
+	dump_stack_print_info(KERN_ERR);
 	pr_err("==================================================================\n");
 
 	lockdep_on();

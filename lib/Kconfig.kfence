@@ -5,16 +5,14 @@ config HAVE_ARCH_KFENCE
 
 menuconfig KFENCE
 	bool "KFENCE: low-overhead sampling-based memory safety error detector"
-	depends on HAVE_ARCH_KFENCE && (SLAB || SLUB)
+	depends on HAVE_ARCH_KFENCE && !KASAN && (SLAB || SLUB)
+	depends on JUMP_LABEL # To ensure performance, require jump labels
 	select STACKTRACE
-	select IRQ_WORK
 	help
 	  KFENCE is a low-overhead sampling-based detector of heap out-of-bounds
 	  access, use-after-free, and invalid-free errors. KFENCE is designed
 	  to have negligible cost to permit enabling it in production
 	  environments.
-
-	  See <file:Documentation/dev-tools/kfence.rst> for more details.
 
 	  Note that, KFENCE is not a substitute for explicit testing with tools
 	  such as KASAN. KFENCE can detect a subset of bugs that KASAN can
@@ -24,17 +22,6 @@ menuconfig KFENCE
 	  enable KASAN due to its cost, consider using KFENCE.
 
 if KFENCE
-
-config KFENCE_STATIC_KEYS
-	bool "Use static keys to set up allocations"
-	default y
-	depends on JUMP_LABEL # To ensure performance, require jump labels
-	help
-	  Use static keys (static branches) to set up KFENCE allocations. Using
-	  static keys is normally recommended, because it avoids a dynamic
-	  branch in the allocator's fast path. However, with very low sample
-	  intervals, or on systems that do not support jump labels, a dynamic
-	  branch may still be an acceptable performance trade-off.
 
 config KFENCE_SAMPLE_INTERVAL
 	int "Default sample interval in milliseconds"
@@ -66,18 +53,5 @@ config KFENCE_STRESS_TEST_FAULTS
 	  and allocations/frees. A value of 0 disables stress testing logic.
 
 	  Only for KFENCE testing; set to 0 if you are not a KFENCE developer.
-
-config KFENCE_KUNIT_TEST
-	tristate "KFENCE integration test suite" if !KUNIT_ALL_TESTS
-	default KUNIT_ALL_TESTS
-	depends on TRACEPOINTS && KUNIT
-	help
-	  Test suite for KFENCE, testing various error detection scenarios with
-	  various allocation types, and checking that reports are correctly
-	  output to console.
-
-	  Say Y here if you want the test to be built into the kernel and run
-	  during boot; say M if you want the test to build as a module; say N
-	  if you are unsure.
 
 endif # KFENCE

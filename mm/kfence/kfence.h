@@ -1,10 +1,4 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Kernel Electric-Fence (KFENCE). For more info please see
- * Documentation/dev-tools/kfence.rst.
- *
- * Copyright (C) 2020, Google LLC.
- */
 
 #ifndef MM_KFENCE_KFENCE_H
 #define MM_KFENCE_KFENCE_H
@@ -15,6 +9,13 @@
 #include <linux/types.h>
 
 #include "../slab.h" /* for struct kmem_cache */
+
+/* For non-debug builds, avoid leaking kernel pointers into dmesg. */
+#ifdef CONFIG_DEBUG_KERNEL
+#define PTR_FMT "%px"
+#else
+#define PTR_FMT "%p"
+#endif
 
 /*
  * Get the canary byte pattern for @addr. Use a pattern that varies based on the
@@ -98,8 +99,8 @@ enum kfence_error_type {
 	KFENCE_ERROR_INVALID_FREE,	/* Invalid free. */
 };
 
-void kfence_report_error(unsigned long address, bool is_write, struct pt_regs *regs,
-			 const struct kfence_metadata *meta, enum kfence_error_type type);
+void kfence_report_error(unsigned long address, const struct kfence_metadata *meta,
+			 enum kfence_error_type type);
 
 void kfence_print_object(struct seq_file *seq, const struct kfence_metadata *meta);
 
