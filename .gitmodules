@@ -1,3 +1,3 @@
-[submodule "KernelSU"]
-	path = KernelSU
-	url = https://github.com/rsuntk/KernelSU.git
+[submodule "BakaSU"]
+	path = BakaSU
+	url = https://github.com/Baka-SU/BakaSU.git
